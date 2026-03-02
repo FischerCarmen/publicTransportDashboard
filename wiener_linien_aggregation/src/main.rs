@@ -18,6 +18,7 @@ fn configure_the_environment() {
 //TODO: Implement good error handling
 //TODO: If direction in fahrwegverlaeufe is null take PatternID
 //TODO: delete entry in stops if MeansOfTransport is ptRufBus
+// test for git
 struct Stop {
     stop_id: i32,
     stop_name: String,
