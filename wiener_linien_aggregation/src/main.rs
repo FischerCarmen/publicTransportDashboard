@@ -1,36 +1,45 @@
 use polars::prelude::*;
 use polars_lazy::prelude::*;
+use polars_rows_iter::*;
 use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io;
 use std::vec;
+mod download;
 
 fn configure_the_environment() {
     unsafe {
         env::set_var("POLARS_FMT_TABLE_ROUNDED_CORNERS", "1"); // apply rounded corners to UTF8-styled tables.
         env::set_var("POLARS_FMT_MAX_COLS", "20"); // maximum number of columns shown when formatting DataFrames.
-        env::set_var("POLARS_FMT_MAX_ROWS", "10"); // maximum number of rows shown when formatting DataFrames.
+        env::set_var("POLARS_FMT_MAX_ROWS", "12531"); // maximum number of rows shown when formatting DataFrames.
         env::set_var("POLARS_FMT_STR_LEN", "50"); // maximum number of characters printed per string value.
     }
 }
 
+
 //TODO: Implement good error handling
-//TODO: If direction in fahrwegverlaeufe is null take PatternID
-//TODO: delete entry in stops if MeansOfTransport is ptRufBus
-// test for git
-struct Stop {
-    stop_id: i32,
-    stop_name: String,
-    lines: String,
-    directions: String,
-    platform: String,
-}
+//
+//#[derive(Debug, FromDataFrameRow)]
+//struct Stop<'a> {
+//    #[column("StopID")]
+//    stop_id : i64,
+//    #[column("StopText")]
+//    stop_text:  &'a str,
+//    #[column("PlatformText")]
+//    platform_text: &'a str,
+//    #[column("Direction")]
+//    direction: i64,
+//    #[column("LineText")]
+//    line_text: &'a str,
+//}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     configure_the_environment();
     let path = "../files/";
     let url = "https://www.wienerlinien.at/ogd_realtime/doku/ogd/";
+
+
 
     let mut csv = HashSet::new();
 
@@ -39,6 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     csv.insert("wienerlinien-ogd-linien.csv".to_string());
     csv.insert("wienerlinien-ogd-fahrwegverlaeufe.csv".to_string());
 
+
+    // Downloads csv from wienerlinien
     for item in csv {
         let request = reqwest::blocking::get(url.to_owned() + &item).expect("request failed");
 
@@ -50,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let seperator = ';';
 
+    // creates polars dataframes from csv
     let mut haltepunkte_df = polars_io::csv::read::CsvReadOptions::default()
         .with_has_header(true)
         .with_parse_options(CsvParseOptions::default().with_separator(seperator as u8))
@@ -90,8 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish()
         .expect("failed to load fahrwegverlaeufe");
 
-    println!("fahrwegverlaeufe_df: {:?}", fahrwegverlaeufe_df);
-
+    // filters out everything that is not in Vienna
     haltepunkte_df = haltepunkte_df
         .clone()
         .lazy()
@@ -99,36 +110,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect()
         .expect("failed to filter haltepunkte_df");
 
+    // casts Stop ID to Int64
     haltepunkte_df = haltepunkte_df
         .lazy()
         .with_column(col("StopID").cast(DataType::Int64).alias("StopID"))
         .collect()
         .expect("failed to alias column StopID haltepunkte_df");
 
+    // drops invalid haltepunkte
     haltepunkte_df = haltepunkte_df
         .drop_nulls::<String>(Some(&["StopID".to_owned()]))
         .expect("failed to drop null haltepunkte_df");
 
+    // casts LineID to Int64
     linien_df = linien_df
         .lazy()
         .with_column(col("LineID").cast(DataType::Int64).alias("LineID"))
         .collect()
         .expect("failed to cast LineID linien_df");
 
+    // drops invalid lininen
     linien_df = linien_df
         .drop_nulls::<String>(Some(&["LineID".to_owned()]))
         .expect("failed to drop null linien_df");
 
+    // casts LininenID to Int64
     fahrwegverlaeufe_df = fahrwegverlaeufe_df
         .lazy()
         .with_column(col("LineID").cast(DataType::Int64).alias("LineID"))
         .collect()
         .expect("failed to cast column LineID fahrwegverlaeufe_df");
 
+    // drops invalid fahrwegverläufe
     fahrwegverlaeufe_df = fahrwegverlaeufe_df
         .drop_nulls::<String>(Some(&["LineID".to_owned()]))
         .expect("failed to drop null fahrwegverlaeufe_df");
 
+    // sometimes the direction column is empty but the information from PatterinID will suffice
+    fahrwegverlaeufe_df = fahrwegverlaeufe_df
+        .lazy()
+        .with_column(
+            when(col("Direction").is_null())
+                .then(col("PatternID"))
+                .otherwise(col("Direction"))
+                .alias("Direction")
+            )
+            .collect()
+            .expect("failed to fill null direction");
+
+    // deletes one entry for U3 that does not make sense
+    fahrwegverlaeufe_df = fahrwegverlaeufe_df
+        .lazy()
+        .filter(col("Direction").neq(lit(3)))
+        .collect()
+        .expect("failes to drop u3 entry");
+
+    // merges haltepunkte and haltestellen on DIVA value
     let mut stops = haltepunkte_df
         .clone()
         .lazy()
@@ -141,6 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect()
         .expect("failed to join haltepunkte_df and haltestellen_df");
 
+    // merges haltepunkte, haltestellen und fahrwegverläufe on StopID
     stops = stops
         .clone()
         .lazy()
@@ -153,8 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect()
         .expect("failed to join stops and fahrwegverlaeufe_df");
 
-    println!("stops: {:?}", stops);
-
+    // merges haltepunkte, haltestellen, fahrwegverläufe und lininen on LineID
     stops = stops
         .clone()
         .lazy()
@@ -167,6 +204,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect()
         .expect("failed to join stops and linien_df");
 
+    // Delete if MeansOfTransport is ptRufBus
+    stops = stops
+        .lazy()
+        .filter(col("MeansOfTransport").neq(lit("ptRufBus")))
+        .collect()
+        .expect("failes to drop ptRufBus");
+
+    // columns needed in finished datastructure
     let stop_id = PlSmallStr::from_str("StopID");
     let line_text = PlSmallStr::from_str("LineText");
     let direction = PlSmallStr::from_str("Direction");
@@ -175,11 +220,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let columns = Some(vec![stop_id.clone(), line_text.clone(), direction.clone()]);
 
-    let stops_unique = stops
+    // computes unique stops using StopID, LineText and Direction
+    stops = stops
         .unique_impl(true, columns, UniqueKeepStrategy::First, None)
         .expect("failed to compute non unique values");
 
-    let stops_columns = stops_unique.get_column_names_str();
+    let mut stops_finished = DataFrame::empty();
+    stops.clone_into(&mut stops_finished);
+
+    let stops_columns = stops.get_column_names_str();
     let columns_to_drop = stops_columns
         .iter()
         .filter(|&col| {
@@ -192,32 +241,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .collect::<Vec<_>>();
 
-    let mut stops_finished = DataFrame::empty();
-    stops_unique.clone_into(&mut stops_finished);
-
     for c in columns_to_drop {
         stops_finished = stops_finished.drop(c).expect("failed to drop");
     }
 
-    println!("stops: {:?}", stops);
-    println!("stops_unique: {:?}", stops_unique);
     println!("stops_finished: {:?}", stops_finished);
+//https://docs.rs/polars-rows-iter/latest/polars_rows_iter/
     Ok(())
 }
-
-//# --- 9. Prepare final JSON ---
-//output = []
-//for _, row in grouped.iterrows():
-//    output.append({
-//        "stopId": int(row['StopID']),
-//        "stopName": row['StopText'],
-//        "lines": row['LineText'],
-//        "directions": row['Direction'],
-//        "platform": row['PlatformText']
-//    })
-//
-//debug(f"Total stops in final JSON: {len(output)}")
-//
-//with open("stops_clean.json", "w", encoding="utf-8") as f:
-//    json.dump(output, f, ensure_ascii=False, indent=2)
-//debug("Generated stops_clean.json")
